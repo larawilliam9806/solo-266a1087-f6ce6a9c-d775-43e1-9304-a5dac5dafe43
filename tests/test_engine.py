@@ -161,18 +161,83 @@ class RangeMappingTest(unittest.TestCase):
         self.assertEqual(start, end)
 
 
-class TouchSpanTest(unittest.TestCase):
-    def test_rules(self):
-        T = engine.edit_touches_span
-        self.assertTrue(T(3, 5, False, 4, 8))     # 删除与标注相交
-        self.assertTrue(T(4, 8, False, 4, 8))     # 删除整个标注
-        self.assertFalse(T(1, 4, False, 4, 8))    # 删除止于标注起点
-        self.assertFalse(T(8, 9, False, 4, 8))    # 删除起于标注终点
-        self.assertTrue(T(6, 6, True, 4, 8))      # 标注内部插入
-        self.assertTrue(T(4, 6, True, 4, 8))      # 替换删掉标注内文字
-        self.assertFalse(T(8, 9, True, 4, 8))     # 替换区间在标注外
-        self.assertFalse(T(4, 4, True, 4, 8))     # 边界插入不算“其中”
-        self.assertFalse(T(8, 8, True, 4, 8))
+class InsertionGapTest(unittest.TestCase):
+    def test_gap_on_plain_original(self):
+        pieces = [engine.piece("orig", None, 0, 6)]  # ABCDEF
+        self.assertEqual(engine.insertion_gap(pieces, 0), (0, False))
+        self.assertEqual(engine.insertion_gap(pieces, 3), (3, False))
+        self.assertEqual(engine.insertion_gap(pieces, 6), (6, False))
+
+    def test_gap_beside_replacement_prefers_surviving_original(self):
+        # 替换 [0,1) 的 A -> X，当前为 X|BCDEF：在替换片段与幸存原文之间插字
+        pieces = [engine.piece("ins", 1, 0, 1),
+                  engine.piece("orig", None, 1, 6)]
+        deleted = {1: [engine.piece("orig", None, 0, 1)]}
+        # 锚点取幸存原文一侧且非 soft：撤回后插入落在原文缝 1，按边界缝处理
+        self.assertEqual(engine.insertion_gap(pieces, 1, deleted), (1, False))
+
+    def test_gap_between_two_replacements_resolves_via_deleted_spans(self):
+        # A->X（替换 [0,1)）、B->Y（替换 [1,2)），当前 X|Y|CDEF，中间插字
+        pieces = [engine.piece("ins", 1, 0, 1),
+                  engine.piece("ins", 2, 0, 1),
+                  engine.piece("orig", None, 2, 6)]
+        deleted = {1: [engine.piece("orig", None, 0, 1)],
+                   2: [engine.piece("orig", None, 1, 2)]}
+        # 两侧都无幸存原文，锚点来自被替换的原文区间，soft=True
+        self.assertEqual(engine.insertion_gap(pieces, 1, deleted), (1, True))
+
+    def test_gap_at_pure_delete_seam(self):
+        # 纯删除 [2,5) 的 CDE 留下接缝，当前 AB|FGH，恰在接缝上插字
+        pieces = [engine.piece("orig", None, 0, 2),
+                  engine.piece("seam", 1, 0, 0),
+                  engine.piece("orig", None, 5, 8)]
+        deleted = {1: [engine.piece("orig", None, 2, 5)]}
+        self.assertEqual(engine.insertion_gap(pieces, 2, deleted), (2, True))
+
+    def test_gap_without_anchor_map_falls_back_to_left(self):
+        pieces = [engine.piece("ins", 1, 0, 1),
+                  engine.piece("orig", None, 1, 6)]
+        # 无 deleted_by_src 时仍能靠幸存原文定位（右侧锚点优先，非 soft）
+        self.assertEqual(engine.insertion_gap(pieces, 1), (1, False))
+        # 两侧都是 ins 且无映射时退回左侧最近原文缝
+        both_ins = [engine.piece("ins", 1, 0, 1), engine.piece("ins", 2, 0, 1)]
+        self.assertEqual(engine.insertion_gap(both_ins, 1), (0, False))
+
+    def test_gap_beside_pure_insert_correction_skips_it(self):
+        # 文首纯插入（无原文痕迹），随后才是原文：插入点在二者边界
+        pieces = [engine.piece("ins", 1, 0, 2),
+                  engine.piece("orig", None, 0, 4)]
+        self.assertEqual(engine.insertion_gap(pieces, 2, {}), (0, False))
+
+
+class EditTouchesOriginalTest(unittest.TestCase):
+    def test_replacement_deleting_original_inside_span(self):
+        deleted = [engine.piece("orig", None, 0, 1)]
+        self.assertTrue(
+            engine.edit_touches_original(deleted, False, None, False, 0, 2))
+        self.assertFalse(
+            engine.edit_touches_original(deleted, False, None, False, 2, 4))
+
+    def test_pure_insert_uses_strict_inner_gap_on_surviving_text(self):
+        T = engine.edit_touches_original
+        self.assertTrue(T([], True, 1, False, 0, 2))    # 缝 1 在标注内部
+        self.assertFalse(T([], True, 0, False, 0, 2))   # 幸存原文边界缝不算
+        self.assertFalse(T([], True, 2, False, 0, 2))
+        self.assertFalse(T([], True, 5, False, 0, 2))
+
+    def test_pure_insert_at_soft_boundary_gap_touches(self):
+        T = engine.edit_touches_original
+        # 锚点来自被删/替换原文（接缝等）：标注边界缝也算触及
+        self.assertTrue(T([], True, 0, True, 0, 2))
+        self.assertTrue(T([], True, 2, True, 0, 2))
+        # soft 锚点在标注外仍不算
+        self.assertFalse(T([], True, 5, True, 0, 2))
+
+    def test_editing_only_inserted_text_does_not_touch_original(self):
+        # 本笔删掉的只是更早勘误写入的文字，没有原文片段 -> 不按原文触及
+        deleted = [engine.piece("ins", 1, 0, 1)]
+        self.assertFalse(
+            engine.edit_touches_original(deleted, False, None, False, 0, 2))
 
 
 if __name__ == "__main__":

@@ -180,14 +180,99 @@ def _fallback_pos(pieces: list[dict], x: int) -> int:
     return pos
 
 
-def edit_touches_span(s: int, e: int, has_text: bool, ca: int, cb: int) -> bool:
-    """判断应用于当前版 [s, e) 的编辑是否触及当前区间 [ca, cb) 的标注。
+def _deleted_orig_span(deleted: list[dict] | None) -> tuple[int | None, int | None]:
+    """一笔勘误删掉的原文片段覆盖的最小/最大原文下标（无原文则返回 None）。"""
+    if not deleted:
+        return None, None
+    orig = [d for d in deleted if d["kind"] == "orig"]
+    if not orig:
+        return None, None
+    return min(d["a"] for d in orig), max(d["b"] for d in orig)
 
-    改删标注内文字（区间相交）或在其中插字（严格内部插入）视为触及；
-    落在标注边界上的插入不算。
+
+def insertion_gap(pieces: list[dict], pos: int,
+                  deleted_by_src: dict[int, list[dict]] | None = None
+                  ) -> tuple[int, bool]:
+    """当前版纯插入位置 pos 对应的“原文坐标缝隙”。
+
+    把所有勘误撤回后，插入文字会落回原文哪个缝隙：返回 (gap, soft)，
+    gap 为该缝隙前的原文字符下标（第 x 与第 x+1 个字符之间的缝，
+    x=0 为文首，x=len(原文) 为文末）；soft 表示该锚点是经更早勘误
+    删除/替换掉的原文区间还原出来的，而非幸存原文上的真实缝隙。
+
+    解析顺序：
+    1. pos 落在某个幸存原文片段上（含其左右边界）：锚点即片段内对应
+       原文下标，soft=False。因此在“替换片段与幸存原文相邻”的边界上
+       插字，锚点取幸存原文一侧（如替换 [0,1) 后在其后插字，锚点为 1
+       而非 0），仍按幸存原文的边界缝处理（不计入标注触及）；
+    2. 否则向两侧查找：替换/删除勘误的片段凭其 deleted_pieces
+       （deleted_by_src：勘误号 -> 撤回用片段）还原它替换/删除的原文
+       下标，纯插入勘误没有原文痕迹则跳过继续向外；由此得到的锚点
+       soft=True；纯删除接缝恰在落点时直接取其原文缝；
+    3. 都找不到时退回左侧最近原文缝（soft=False）。
+
+    严格落在其他勘误文字内部的插入必与该勘误冲突、必先于它撤回，因此
+    那些观察不到的歧义锚点不影响待复核判定。
     """
-    if s < e and s < cb and ca < e:
+    # 落点恰在某条纯删除接缝上：接缝是精确锚点，优先于相邻原文的边界缝
+    cur = 0
+    for p in pieces:
+        plen = p["b"] - p["a"]
+        if p["kind"] == "seam" and cur == pos and deleted_by_src is not None:
+            lo, _ = _deleted_orig_span(deleted_by_src.get(p["src"]))
+            if lo is not None:
+                return lo, True
+        cur += plen
+
+    cur = 0
+    for p in pieces:
+        plen = p["b"] - p["a"]
+        # 零长接缝本身可能恰在 pos：不能按相邻原文片段的边界提前命中，
+        # 已在上方接缝预扫中处理
+        if (p["kind"] == "orig" and plen > 0 and cur <= pos <= cur + plen):
+            return p["a"] + (pos - cur), False
+        cur += plen
+
+    cur = 0
+    left_gap = 0
+    right_anchor = None
+    for p in pieces:
+        plen = p["b"] - p["a"]
+        ps, pe = cur, cur + plen
+        if p["kind"] == "orig":
+            if pe <= pos:
+                left_gap = p["b"]            # 最近的左侧原文片段
+            elif ps >= pos and right_anchor is None:
+                right_anchor = p["a"]        # 最近的右侧原文片段
+        elif deleted_by_src is not None and (pe <= pos or ps >= pos):
+            lo, hi = _deleted_orig_span(deleted_by_src.get(p["src"]))
+            if lo is not None:
+                if pe <= pos:
+                    left_gap = hi             # 按顺序后者更近，直接覆盖
+                elif right_anchor is None:
+                    right_anchor = lo
+        cur = pe
+
+    if right_anchor is not None:
+        return right_anchor, True
+    return left_gap, False
+
+
+def edit_touches_original(deleted: list[dict], is_insert: bool,
+                         gap: int, soft: bool, a: int, b: int) -> bool:
+    """判断一笔编辑是否触及原文区间 [a, b) 的标注。
+
+    两条规则（与原文字段当前是否已被更早的勘误替换/删除无关）：
+    1. 改删：本笔删掉的片段中含落在 [a, b) 内的原文片段；
+    2. 纯插入：落点的原文坐标缝隙位于标注内部。幸存原文上严格内部
+       （a < gap < b）才算，边界缝不算；若锚点来自被删除/替换的原文
+       区间（soft），则其边界缝也位于标注曾经占据的位置，计入触及。
+    """
+    if not is_insert:
+        for d in deleted:
+            if d["kind"] == "orig" and d["a"] < b and a < d["b"]:
+                return True
+        return False
+    if a < gap < b:
         return True
-    if has_text and s == e and ca < s < cb:
-        return True
-    return False
+    return soft and a <= gap <= b

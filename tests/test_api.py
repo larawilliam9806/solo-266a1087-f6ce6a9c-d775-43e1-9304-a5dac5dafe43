@@ -233,6 +233,78 @@ def test_entity_pending_until_all_affecting_retracted(client):
     assert version(client, doc)["pending_entities"] == []
 
 
+def test_entity_stays_pending_after_earlier_replace_retracted(client):
+    """连续勘误撤回：先替换标注首字，再在替换片段与幸存原文之间插字。
+
+    撤回替换笔后正文恢复原字，但插入笔仍影响原标注，实体必须保持待复核，
+    直到插入笔也撤回；恢复有效后区间按当前正文返回。
+    """
+    doc = import_doc(client, "张三", entities=[
+        {"number": 1, "kind": "person", "name": "张三", "start": 0, "end": 2}])
+    correct(client, doc, 0, 1, "李")         # 1: 张 -> 李（触及原标注 [0,2)）
+    correct(client, doc, 1, 1, "小")         # 2: 当前稿“李|三”之间插“小”
+    v = version(client, doc)
+    assert v["text"] == "李小三"
+    assert v["valid_entities"] == []
+    assert v["pending_entities"][0]["affecting_corrections"] == [1, 2]
+    # 撤回第一笔：正文为“张小三”，但第二笔仍计为影响
+    assert retract(client, doc, 1).status_code == 200
+    v = version(client, doc)
+    assert v["text"] == "张小三"
+    assert v["valid_entities"] == []
+    pend = v["pending_entities"]
+    assert len(pend) == 1 and pend[0]["affecting_corrections"] == [2]
+    assert (pend[0]["start"], pend[0]["end"]) == (0, 3)   # 按当前正文的区间
+    # 第二笔也撤回后才恢复有效，区间与当前正文一致
+    assert retract(client, doc, 2).status_code == 200
+    v = version(client, doc)
+    assert v["text"] == "张三"
+    assert v["pending_entities"] == []
+    assert [(e["number"], e["start"], e["end"])
+            for e in v["valid_entities"]] == [(1, 0, 2)]
+
+
+def test_insert_between_two_replaces_keeps_effect_after_retractions(client):
+    """两笔替换分别改掉标注内两字，中间插入一笔：逐笔撤回替换不丢插入影响。"""
+    doc = import_doc(client, "ABCD", entities=[
+        {"number": 1, "kind": "person", "name": "AB", "start": 0, "end": 2},
+        {"number": 2, "kind": "place", "name": "CD", "start": 2, "end": 4}])
+    correct(client, doc, 0, 1, "x")          # 1: A -> x，触及实体 1
+    correct(client, doc, 1, 2, "y")          # 2: B -> y，触及实体 1
+    correct(client, doc, 1, 1, "中")         # 3: 在 x|y 之间插字，锚点缝 1 在 [0,2) 内
+    v = version(client, doc)
+    assert v["text"] == "x中yCD"
+    assert {e["number"] for e in v["pending_entities"]} == {1}
+    retract(client, doc, 1)
+    v = version(client, doc)
+    assert v["text"] == "A中yCD"
+    assert {e["number"]: e["affecting_corrections"]
+            for e in v["pending_entities"]} == {1: [2, 3]}
+    retract(client, doc, 2)
+    v = version(client, doc)
+    assert v["text"] == "A中BCD"
+    pend = {e["number"]: e for e in v["pending_entities"]}
+    assert set(pend) == {1}
+    assert pend[1]["affecting_corrections"] == [3]
+    assert (pend[1]["start"], pend[1]["end"]) == (0, 3)
+    retract(client, doc, 3)
+    v = version(client, doc)
+    assert v["text"] == "ABCD"
+    assert v["pending_entities"] == []
+
+
+def test_unrelated_entity_untouched_by_replacement_chain(client):
+    """无关标注沿用原规则：勘误只触及实体 1 时，实体 2 始终有效且区间平移。"""
+    doc = import_doc(client)
+    correct(client, doc, 0, 1, "李")
+    correct(client, doc, 1, 1, "小")
+    retract(client, doc, 1)
+    v = version(client, doc)
+    place = [e for e in v["valid_entities"] if e["number"] == 2][0]
+    assert place["status"] == "valid"
+    assert (place["start"], place["end"]) == (5, 8)   # 前插一字，整体后移
+
+
 def test_entity_pending_on_insert_within_and_delete(client):
     doc = import_doc(client)
     correct(client, doc, 5, 5, "（音）")      # 在“北京市”中插字

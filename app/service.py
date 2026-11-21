@@ -85,11 +85,19 @@ def apply_correction(conn: sqlite3.Connection, doc_id: int,
     deleted_text = engine.render(deleted, doc["original_text"],
                                  db.correction_texts(conn, doc_id))
 
-    # 标注受影响判定：用应用前的片段表（与 [s, e) 同一坐标系）
+    # 标注受影响判定：一律按标注的原文坐标，与原文字段当前是否已被更早的
+    # 勘误替换/删除无关。这样先改后插、再撤回前笔时，后笔对原标注的影响
+    # 不会因区间映射退化而丢失。
+    is_insert = s == e
+    if is_insert:
+        gap, soft = engine.insertion_gap(
+            pieces, s, db.deleted_pieces_by_src(conn, doc_id))
+    else:
+        gap, soft = None, False
     effects = []
     for ent in _entities(conn, doc_id):
-        ca, cb = engine.current_range(pieces, ent["start"], ent["end"])
-        if engine.edit_touches_span(s, e, bool(text), ca, cb):
+        if engine.edit_touches_original(
+                deleted, is_insert, gap, soft, ent["start"], ent["end"]):
             effects.append(ent["id"])
 
     conn.execute(

@@ -118,6 +118,15 @@ def correction_texts(conn: sqlite3.Connection, doc_id: int) -> dict[int, str]:
     return {r["number"]: r["text"] for r in rows}
 
 
+def deleted_pieces_by_src(conn: sqlite3.Connection, doc_id: int) -> dict[int, list[dict]]:
+    """勘误号 -> 该笔应用时删掉的片段（用于还原插入锚点的原文坐标）。"""
+    rows = conn.execute(
+        "SELECT number, deleted_pieces FROM corrections WHERE document_id = ?",
+        (doc_id,),
+    ).fetchall()
+    return {r["number"]: loads_pieces(r["deleted_pieces"]) for r in rows}
+
+
 def next_correction_number(conn: sqlite3.Connection, doc_id: int) -> int:
     row = conn.execute(
         "SELECT COALESCE(MAX(number), 0) + 1 AS n FROM corrections WHERE document_id = ?",
